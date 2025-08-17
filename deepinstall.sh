@@ -1,110 +1,128 @@
-#!/bin/bash
-# 1. Bölümleri bağlama
-mount /dev/nvme0n1p5 /mnt
+#!/usr/bin/env bash
+set -e
+
+# === USER CONFIG ===
+DISK_ROOT="/dev/nvme0n1p5"
+DISK_EFI="/dev/nvme0n1p6"
+HOSTNAME="archg15"
+USERNAME="elon"
+PASSWORD="1234"   # kurulum sonrası chpasswd ile değiştir
+TIMEZONE="Europe/Istanbul"
+KEYMAP="us"
+
+# === FORMAT PARTITIONS ===
+echo "[*] Formatting partitions..."
+mkfs.ext4 $DISK_ROOT
+mkfs.fat -F32 $DISK_EFI
+
+# === MOUNT PARTITIONS ===
+echo "[*] Mounting partitions..."
+mount $DISK_ROOT /mnt
 mkdir -p /mnt/boot
-mount /dev/nvme0n1p6 /mnt/boot
+mount $DISK_EFI /mnt/boot
 
-# 2. Temel sistemi yükleme
-pacstrap /mnt base linux linux-firmware intel-ucode \
-    nvidia-open-dkms linux-headers lib32-nvidia-utils \
-    pipewire pipewire-alsa pipewire-pulse lib32-pipewire wireplumber \
-    bluez bluez-utils bluez-obex \
-    networkmanager \
-    sddm hyprland waybar rofi foot \
-    xdg-desktop-portal-hyprland hyprpolkitagent \
-    playerctl
+# === BASE SYSTEM INSTALL ===
+echo "[*] Installing base system..."
+pacstrap -K /mnt base linux linux-firmware sof-firmware \
+    nvidia-dkms nvidia-utils lib32-nvidia-utils nvidia-settings egl-wayland \
+    pipewire pipewire-alsa pipewire-pulse pipewire-jack wireplumber lib32-pipewire \
+    bluez bluez-utils networkmanager \
+    mesa vulkan-icd-loader lib32-vulkan-icd-loader \
+    vim sudo git unzip wget curl base-devel sdcv
 
-# 3. fstab
+# === FSTAB ===
+echo "[*] Generating fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab
 
+# === CHROOT CONFIGURATION ===
 arch-chroot /mnt /bin/bash <<EOF
-# 4. Locale, Klavye, Saat
-ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime
+echo "[*] Setting timezone..."
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
+
+echo "[*] Locale..."
 echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
-echo "KEYMAP=us" > /etc/vconsole.conf
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
 
-# 5. root şifresi (gereksiz ise atlayabilirsiniz)
-echo "root:password" | chpasswd
+echo "[*] Hostname..."
+echo "$HOSTNAME" > /etc/hostname
 
-# 6. Kullanıcı oluşturma
-useradd -m -G wheel,network -s /bin/bash user
-echo "user:password" | chpasswd
-echo "user ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/user
+echo "[*] Network setup..."
+systemctl enable NetworkManager
+systemctl enable bluetooth
 
-# 7. systemd-boot kurulumu
-bootctl --path=/boot install
-root_uuid=$(blkid -s PARTUUID -o value /dev/nvme0n1p5)
-cat <<EOL > /boot/loader/loader.conf
-default arch
-EOL
-cat <<EOL > /boot/loader/entries/arch.conf
-title   Arch Linux
-linux   /vmlinuz-linux
-initrd  /intel-ucode.img
-initrd  /initramfs-linux.img
-options root=PARTUUID=$root_uuid rw
-EOL
+echo "[*] Users..."
+echo "root:$PASSWORD" | chpasswd
+useradd -m -G wheel -s /bin/bash $USERNAME
+echo "$USERNAME:$PASSWORD" | chpasswd
+echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/99_wheel
 
-# 8. NVIDIA ayarları
-echo "options nvidia-drm modeset=1" > /etc/modprobe.d/nvidia.conf
-mkinitcpio -P
+echo "[*] Bootloader..."
+pacman -S --noconfirm grub efibootmgr os-prober
+grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="nvidia_drm.modeset=1 nvidia.NVreg_PreserveVideoMemoryAllocations=1 nvidia.NVreg_EnableGpuFirmware=0 /' /etc/default/grub
+grub-mkconfig -o /boot/grub/grub.cfg
 
-# 9. SDDM ve NM servisi
-systemctl enable --now NetworkManager
-systemctl enable --now bluetooth
-systemctl enable --now sddm
+echo "[*] Installing Hyprland + Rice..."
+pacman -S --noconfirm hyprland xdg-desktop-portal-hyprland \
+    waybar rofi kitty alacritty mako \
+    ttf-jetbrains-mono-nerd noto-fonts noto-fonts-cjk noto-fonts-emoji \
+    thunar gvfs thunar-archive-plugin file-roller brightnessctl pavucontrol playerctl \
+    otf-font-awesome
 
-# 10. TLP etkinleştirme
-systemctl enable --now tlp
-systemctl mask systemd-rfkill
+# Create config directories
+mkdir -p /home/$USERNAME/.config/{hypr,waybar,rofi,kitty,rofi/scripts}
+chown -R $USERNAME:$USERNAME /home/$USERNAME/.config
 
-# 11. Waybar ve Rofi yapılandırmaları
-mkdir -p /home/user/.config/waybar
-cat <<EOL > /home/user/.config/waybar/config
-{
-    "layer": "top",
-    "position": "top",
-    "modules-left": ["sway/workspaces", "network", "battery", "clock"],
-    "modules-right": ["pulseaudio", "custom/music"],
-    "custom/music": {
-        "exec": "playerctl metadata --format '{{ artist }} - {{ title }}'",
-        "interval": 5
-    }
-}
-EOL
-
-mkdir -p /home/user/.config/rofi
-cat <<EOL > /home/user/.config/rofi/config.rasi
-configuration {
-    modi: "drun,run,ssh,window";
-    show-icons: true;
-}
-window {
-    background-color: rgba(30,30,30,230);
-    border-radius: 12px;
-}
-listview {
-    fixed-height: 2;
-}
-EOL
-
-# 12. Hyprland monitör konfigürasyonu
-mkdir -p /home/user/.config/hypr
-cat <<EOL > /home/user/.config/hypr/hyprland.conf
-monitor = eDP-1, 1920x1080@60, 0x0, 1
-monitor = HDMI-A-1, 2560x1080@60, 1920x0, 1
+# === Hyprland config ===
+cat <<HYPR >/home/$USERNAME/.config/hypr/hyprland.conf
+monitor=,preferred,auto,1
+monitor=HDMI-A-1,2560x1080@60,1920x0,1
+exec-once = waybar & mako & nm-applet & blueman-applet
+exec-once = hyprctl setcursor Bibata-Modern-Ice 24
 general {
-    # Kodlama amaçlı şık ayarlar
-    border_size = 2
-    gap_size = 6
-    decoration_corner_radius = 10
+    gaps_in=8
+    gaps_out=16
+    border_size=3
+    col.active_border=0xff82aaff
+    col.inactive_border=0xff444444
+    rounding=10
 }
-EOL
+bind=SUPER,RETURN,exec,kitty
+bind=SUPER,D,exec,rofi -show drun
+bind=SUPER,Q,killactive,
+bind=SUPER,E,exec,thunar
+bind=SUPER,F,fullscreen
+bind=SUPER,T,togglefloating,
+bind=SUPER,O,exec,/home/$USERNAME/.config/rofi/scripts/dict.sh
+HYPR
 
-# Yetki ve sahiplik ayarları
-chown -R user:user /home/user/.config
+# === Waybar config ===
+cat <<WAY >/home/$USERNAME/.config/waybar/config.jsonc
+{
+  "layer": "top",
+  "position": "top",
+  "modules-left": ["network", "bluetooth", "pulseaudio", "backlight", "battery"],
+  "modules-center": ["clock"],
+  "modules-right": ["tray"],
+  "clock": { "format": "{:%A %H:%M}", "tooltip-format": "{:%Y-%m-%d}" }
+}
+WAY
+
+# === Rofi dictionary script ===
+cat <<DICT >/home/$USERNAME/.config/rofi/scripts/dict.sh
+#!/bin/bash
+WORD=\$(echo "" | rofi -dmenu -p "Oxford Dict")
+if [ -n "\$WORD" ]; then
+    sdcv "\$WORD" | rofi -dmenu -i -p "\$WORD"
+fi
+DICT
+
+chmod +x /home/$USERNAME/.config/rofi/scripts/dict.sh
+chown $USERNAME:$USERNAME /home/$USERNAME/.config/rofi/scripts/dict.sh
 
 EOF
+
+echo "[*] Installation complete! Reboot to enjoy your Hyprland setup with Rofi dictionary."
