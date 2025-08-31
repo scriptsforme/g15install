@@ -20,7 +20,7 @@ pacstrap /mnt \
   vim nano sudo \
   mesa mesa-utils vulkan-intel intel-media-driver libva-utils \
   xorg xorg-xinit \
-  plasma-meta kde-applications sddm \
+  plasma-meta sddm \
   networkmanager \
   grub efibootmgr os-prober \
   firefox konsole dolphin \
